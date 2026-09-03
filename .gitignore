@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv*/
+
+# Local installs and downloads (see docs/carla_setup.md)
+carla/
+vendor/
+
+# Run outputs
+logs/
+outputs/
+
+# Credentials
+.env
+secrets/

@@ -1,0 +1,12 @@
+# CARLA client + Scenic. Python 3.10 or 3.12 (carla 0.9.16 ships wheels for both).
+# The client must match the server: CARLA 0.9.15 is no longer on any official mirror,
+# so everything here targets 0.9.16.
+carla==0.9.16
+scenic==3.1.0a1
+# scenic 3.1.0a1 declares shapely ~= 2.0, which admits 2.1.x; under 2.1 scenarios still
+# compile but scene sampling fails in scenic/core/regions.py (points() signature change).
+shapely>=2.0,<2.1
+numpy>=1.26
+opencv-python>=4.10
+imageio-ffmpeg>=0.6
+pillow>=10
