@@ -20,7 +20,8 @@ import paths  # noqa: E402  (Carlamayo + CARLA PythonAPI on sys.path, repo locat
 
 import module.config as cfg
 from module.inference import extract_trajectory_samples, select_trajectory_by_prev_similarity
-from module.pid_controller import OfficialPIDFollower
+from module.pid_controller import (OfficialPIDFollower, alpamayo_to_carla_local,
+                                   local_to_world)
 from module.visualization import project_trajectory_to_image
 
 import pid_probe; pid_probe.install()
@@ -48,6 +49,243 @@ FPV_W, FPV_H = 1280, 720
 # how many get painted. Setting NUM_TRAJ_SAMPLES=1 to get a single line silently
 # disables that filter; this flag gets the single line without paying for it.
 DRAW_SELECTED_ONLY = True
+
+
+# Alpamayo's trajectory head emits 64 waypoints at dt=0.1 s (checkpoint
+# config.json: "dt": 0.1), so every prediction is a 6.4 second plan and the speed
+# the model intends is simply its arclength over that horizon.
+TRAJ_DT = 0.1
+
+
+class PlanSpeedFollower(OfficialPIDFollower):
+    """PID follower that takes its target speed from the model's own plan.
+
+    Carlamayo derives the target from a heuristic on how far away the farthest
+    waypoint is:
+
+        target_kmh = clip(10.0 + 0.5 * traj_extent, 10.0, 35.0)
+
+    The floor in that expression means the ego is commanded to keep moving at
+    10 km/h no matter what the model predicted, so it cannot come to a stop.
+    Measured against upstream's own Town03 run: in every frame where Alpamayo
+    planned to stop, the PID was still told to drive at 10-11 km/h. That is
+    tolerable in free driving, where it happens in 3% of frames, and fatal on a
+    corner-case corpus where 46% of the scenarios exist precisely to make the
+    car stop or yield.
+
+    Reading the plan instead of guessing at it removes both ends of the problem:
+    a stopping plan asks for 0 km/h, and a long plan is allowed past 35 km/h.
+    Kept behind --speed-mode so the upstream behaviour stays reproducible.
+    """
+
+    MAX_KMH = 50.0
+
+    def compute_control(self, vehicle_tf, wp_ego, speed_mps):
+        wp = np.asarray(wp_ego, dtype=np.float64)
+        n = len(wp)
+        if n < 2:
+            return super().compute_control(vehicle_tf, wp_ego, speed_mps)
+        reach = float(np.linalg.norm(np.diff(wp[:, :2], axis=0), axis=1).sum())
+        target_kmh = float(np.clip(3.6 * reach / ((n - 1) * TRAJ_DT), 0.0, self.MAX_KMH))
+
+        wp_world = local_to_world(vehicle_tf, alpamayo_to_carla_local(wp))
+        target_wp, target_idx, lookahead_m = self._pick_target(wp_world, speed_mps)
+        if target_wp is None:
+            return 0.0, 0.0, 0.0, {"mode": "plan_speed_no_target", "traj_extent": 0.0}
+        c = self.pid.run_step(target_kmh, target_wp)
+        return float(c.steer), float(c.throttle), float(c.brake), {
+            "mode": "plan_speed",
+            "target_speed_kmh": target_kmh,
+            "lookahead_m": lookahead_m,
+            "target_idx": int(target_idx),
+            "traj_extent": float(np.max(np.linalg.norm(wp[:, :2], axis=1))),
+        }
+
+
+class PlanVelocityFollower(OfficialPIDFollower):
+    """Target speed = the velocity the plan itself is carrying, not its length.
+
+    Both other controllers derive target speed from how *long* the predicted
+    path is:
+
+        upstream : clip(10.0 + 0.5 * traj_extent, 10.0, 35.0)
+        plan     : 3.6 * arclength / 6.4
+
+    Alpamayo's output is a 6.4 s plan, so when it decides to slow down the path
+    necessarily gets shorter -- less distance covered in the same 6.4 s. Feeding
+    that back as "go slower" closes a positive feedback loop:
+
+        slower -> shorter path -> read as slower -> slower still
+
+    Measured on scenario 1 (R1): between t=83 and t=93 the path fell 65.4 m ->
+    15.2 m and the ego went 34.8 km/h -> 0.0, while the Chain-of-Causation said
+    "adapt speed for the right curve ahead" on all twenty of those frames. The
+    model asked to slow for a bend; the controller stopped the car dead.
+
+    The waypoints are evenly spaced in time (checkpoint config.json: dt = 0.1 s),
+    so the speed the model intends *now* is simply how far apart the first few
+    waypoints are. Reading that decouples "how fast" from "how far": a plan to
+    cruise at 30 km/h gives the same near-term spacing whether the plan runs 6 m
+    or 60 m. A slow-down then reads as a slow-down instead of as a stop.
+
+    The target is also EMA-smoothed. Upstream smooths the control output
+    (CONTROL_SMOOTH_ALPHA) but not the target it is chasing, so per-frame
+    prediction noise still arrives at the PID as a step change.
+    """
+
+    AT_LOOKAHEAD = False   # read at the aim point rather than at the ego
+    LOOK_S = 1.5        # read the plan's velocity over its first 1.5 seconds
+    MAX_KMH = 50.0
+    TGT_ALPHA = 0.3     # EMA on the target speed itself
+
+    def __init__(self, world, vehicle):
+        super().__init__(world, vehicle)
+        self._tgt = None
+
+    def compute_control(self, vehicle_tf, wp_ego, speed_mps):
+        wp = np.asarray(wp_ego, dtype=np.float64)
+        n = len(wp)
+        if n < 3:
+            return super().compute_control(vehicle_tf, wp_ego, speed_mps)
+
+        wp_world0 = local_to_world(vehicle_tf, alpamayo_to_carla_local(wp))
+        if self.AT_LOOKAHEAD:
+            # The opening of the plan starts from the ego's *current* velocity,
+            # so using it as a target is circular -- it asks the car to keep
+            # doing what it is already doing and never to accelerate. The speed
+            # the model actually intends is the one it plans to be carrying
+            # where the PID is aiming, so read the spacing around that index.
+            _, j, _ = self._pick_target(wp_world0, speed_mps)
+            lo, hi = max(1, j - 2), min(n - 1, max(2, j) + 3)
+            step = np.linalg.norm(np.diff(wp[lo - 1:hi + 1, :2], axis=0), axis=1).mean()
+            raw = float(np.clip(3.6 * step / TRAJ_DT, 0.0, self.MAX_KMH))
+        else:
+            k = max(2, min(n - 1, int(round(self.LOOK_S / TRAJ_DT))))
+            near = float(np.linalg.norm(np.diff(wp[:k + 1, :2], axis=0), axis=1).sum())
+            raw = float(np.clip(3.6 * near / (k * TRAJ_DT), 0.0, self.MAX_KMH))
+        self._tgt = raw if self._tgt is None else \
+            (1 - self.TGT_ALPHA) * self._tgt + self.TGT_ALPHA * raw
+        target_kmh = float(self._tgt)
+
+        wp_world = local_to_world(vehicle_tf, alpamayo_to_carla_local(wp))
+        target_wp, target_idx, lookahead_m = self._pick_target(wp_world, speed_mps)
+        if target_wp is None:
+            return 0.0, 0.0, 0.0, {"mode": "plan_velocity_no_target", "traj_extent": 0.0}
+        c = self.pid.run_step(target_kmh, target_wp)
+        return float(c.steer), float(c.throttle), float(c.brake), {
+            "mode": "plan_velocity",
+            "target_speed_kmh": target_kmh,
+            "target_raw_kmh": raw,
+            "lookahead_m": lookahead_m,
+            "target_idx": int(target_idx),
+            "traj_extent": float(np.max(np.linalg.norm(wp[:, :2], axis=1))),
+        }
+
+
+pid_probe.install(PlanSpeedFollower)
+class PlanLookaheadFollower(PlanVelocityFollower):
+    """PlanVelocityFollower, but reading the plan's velocity at the aim point."""
+    AT_LOOKAHEAD = True
+
+
+pid_probe.install(PlanVelocityFollower)
+pid_probe.install(PlanLookaheadFollower)   # its override would otherwise shadow the probe
+
+
+class TunedPIDFollower(OfficialPIDFollower):
+    """Upstream's targets and geometry, rescaled longitudinal gains.
+
+    Nothing here changes what the model is asked to do -- the target speed is
+    still upstream's clip(10 + 0.5*extent, 10, 35). What changes is how hard
+    CARLA reacts to being wrong about it.
+
+    CARLA's PIDLongitudinalController takes its error in km/h
+    (agents/navigation/controller.py:154) and clips K_P*e + K_D*de + K_I*ie to
+    [-1, 1], and VehiclePIDController.run_step maps any negative output straight
+    to brake with no deadband. With PID_LON_KP = 0.9 the controller reaches full
+    authority at 1.11 km/h of error, so a 2.4 km/h overshoot became a 0.44 brake
+    and the car stopped two frames later. That gain is upstream's config, not a
+    porting artefact: it is the amplifier that turns plan jitter into lurching.
+
+    Three independent knobs, so their effects can be attributed separately:
+
+    LON_KP              rescale so full authority arrives at a speed error a
+                        driver would actually respond to. K_I is scaled by the
+                        same factor, keeping the K_I:K_P ratio upstream chose.
+                        Note K_I matters more than it looks: _ie = sum(buffer)*dt
+                        over a 10-deep buffer at dt=0.1 is ~= the error itself,
+                        so upstream's 0.05 saturates on its own at 20 km/h.
+    BRAKE_DEADBAND_KMH  coast rather than brake when barely over target. A human
+                        lifts off; upstream stamps the brake pedal.
+    STEER_GUARD         when the plan is too short to resolve the lookahead, the
+                        lateral target is drawn from the noisy near field. Steer
+                        jitter measures 2.2x higher while stopped (0.0237 vs
+                        0.0109) with mean extent 6.8 m vs 24.0 m, which is how a
+                        stopped car creeps out of its lane. Hold straight instead
+                        of chasing a target the plan does not actually define.
+    """
+
+    LON_KP = 0.07             # full authority at ~14 km/h of error, not 1.11
+    BRAKE_DEADBAND_KMH = 0.0
+    STEER_GUARD = False
+    STEER_GUARD_TAIL_FRAC = 0.8   # guard when the lookahead lands past this much of the plan
+    STEER_GUARD_MAX_MPS = 1.0     # ...and only while barely moving
+
+    def __init__(self, world, vehicle):
+        super().__init__(world, vehicle)
+        if self.LON_KP:
+            scale = self.LON_KP / cfg.PID_LON_KP
+            self.pid.change_longitudinal_PID({
+                "K_P": self.LON_KP,
+                "K_I": cfg.PID_LON_KI * scale,
+                "K_D": cfg.PID_LON_KD * scale,
+                "dt": cfg.CONTROL_DT,
+            })
+
+    def compute_control(self, vehicle_tf, wp_ego, speed_mps):
+        # Reach the real method directly: super().compute_control is the probe's
+        # wrapper, and going through it would log every step twice.
+        base = getattr(OfficialPIDFollower, "_probe_orig", None) or OfficialPIDFollower.compute_control
+        steer, throttle, brake, dbg = base(self, vehicle_tf, wp_ego, speed_mps)
+        dbg["lon_kp"] = self.LON_KP or cfg.PID_LON_KP
+        dbg.setdefault("traj_pts", int(np.asarray(wp_ego).shape[0]))
+
+        if self.BRAKE_DEADBAND_KMH and brake > 0.0:
+            err = float(dbg.get("target_speed_kmh", 0.0)) - speed_mps * 3.6
+            if -self.BRAKE_DEADBAND_KMH < err <= 0.0:
+                throttle = brake = 0.0
+                dbg["deadband_coast"] = True
+
+        if self.STEER_GUARD:
+            # First attempt compared the plan's ARC LENGTH to the lookahead. That is
+            # dead code: arc is the sum of 63 segments and is always larger than a
+            # 4 m lookahead, so it fired 0 times in 97 calls. The quantity that
+            # actually matters is where along the plan the lookahead lands. Measured
+            # over the scene-9 runs: while stopped, target_idx averages 53 of 63 and
+            # sits in the last fifth of the plan on 64% of frames (moving: 26, 19%),
+            # because a stopped car's waypoints are packed so tightly that 4 m of arc
+            # consumes the whole prediction. The lateral controller is then steering
+            # at the terminal waypoint of a 6.4 s plan -- its least constrained point.
+            # Speed-gated, because the tail condition alone is far too blunt. Over
+            # 776 recorded control steps it holds on 32% of frames -- including 100
+            # while moving, 14 of which command a real turn (|steer| > 0.10). Gating
+            # on speed < 1 m/s narrows it to 5% of frames and 2 such turns, which is
+            # the actual pathology: a stopped car whose plan has been consumed by the
+            # lookahead. Note target_idx == n does NOT mean the plan is shorter than
+            # the lookahead -- searchsorted returns n when the lookahead lands in the
+            # final segment -- which is why the earlier arc-length test never fired.
+            n = int(dbg.get("traj_pts", len(wp_ego))) - 1
+            idx = int(dbg.get("target_idx", 0))
+            if (n > 0 and idx > self.STEER_GUARD_TAIL_FRAC * n
+                    and speed_mps < self.STEER_GUARD_MAX_MPS):
+                steer = 0.0
+                dbg["steer_guard"] = True
+                dbg["target_idx_frac"] = round(idx / n, 3)
+
+        return steer, throttle, brake, dbg
+
+
+pid_probe.install(TunedPIDFollower)
 
 
 DETERMINISTIC = False
@@ -172,7 +410,11 @@ class DriverCore:
                                   # that chose to stop
         self.cam_order = list(adapter.source_camera_configs)
         self.speed_mode = speed_mode
-        self.pid = OfficialPIDFollower(world, ego)
+        follower = {"plan": PlanSpeedFollower,
+                    "planvel": PlanVelocityFollower,
+                    "planlook": PlanLookaheadFollower,
+                    "tuned": TunedPIDFollower}.get(speed_mode, OfficialPIDFollower)
+        self.pid = follower(world, ego)
 
     # ---------- sensors ----------
     def attach_sensors(self):

@@ -84,11 +84,23 @@ def main():
     ap.add_argument("--steps", type=int, default=120)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--replan-every", type=int, default=1)
+    ap.add_argument("--speed-mode", default="carlamayo", choices=["carlamayo", "plan", "planvel", "planlook", "tuned"],
+                    help="carlamayo = upstream's clip(10+0.5*extent,10,35) heuristic; "
+                         "plan = the speed its whole 6.4 s trajectory implies; "
+                         "planvel = the velocity the plan carries over its first 1.5 s")
     ap.add_argument("--traj-samples", type=int, default=5,
                     help="NUM_TRAJ_SAMPLES; 5 keeps the similarity filter alive (upstream ships 1)")
     ap.add_argument("--draw-all-samples", action="store_true",
                     help="paint the whole candidate spread (red selected + white rejected). "
                          "Off by default: the ensemble is always sampled, only one line is drawn")
+    ap.add_argument("--lon-kp", type=float, default=0.0,
+                    help="TunedPIDFollower longitudinal K_P (0 = upstream's 0.9, which "
+                         "saturates at 1.11 km/h of error). K_I scales with it")
+    ap.add_argument("--brake-deadband", type=float, default=0.0,
+                    help="coast instead of braking within this many km/h over target")
+    ap.add_argument("--steer-guard", action="store_true",
+                    help="hold steering straight when the plan is too short to resolve "
+                         "the lateral lookahead")
     ap.add_argument("--no-resume", action="store_true",
                     help="re-render even if this scene is already in results_<tag>.jsonl")
     ap.add_argument("--tm-port", type=int, default=9100,
@@ -105,6 +117,16 @@ def main():
     if a.draw_all_samples:
         core_mod.DRAW_SELECTED_ONLY = False
         print("DRAW_SELECTED_ONLY = False (full candidate spread)", flush=True)
+    if a.lon_kp:
+        core_mod.TunedPIDFollower.LON_KP = a.lon_kp
+    if a.brake_deadband:
+        core_mod.TunedPIDFollower.BRAKE_DEADBAND_KMH = a.brake_deadband
+    if a.steer_guard:
+        core_mod.TunedPIDFollower.STEER_GUARD = True
+    if a.speed_mode == "tuned":
+        print(f"tuned: LON_KP={core_mod.TunedPIDFollower.LON_KP} "
+              f"deadband={core_mod.TunedPIDFollower.BRAKE_DEADBAND_KMH} "
+              f"steer_guard={core_mod.TunedPIDFollower.STEER_GUARD}", flush=True)
 
     if a.traj_samples:
         cfg.NUM_TRAJ_SAMPLES = a.traj_samples
@@ -160,7 +182,7 @@ def main():
 
     rec = {"id": a.name, "town": cfg.CARLA_MAP, "model": ad.display_name,
            "version": a.version, "seed": a.seed, "replan_every": a.replan_every,
-           "traj_samples": a.traj_samples, 
+           "traj_samples": a.traj_samples, "speed_mode": a.speed_mode,
            "status": "unknown"}
     t_run = time.time()
     core = None
@@ -170,7 +192,7 @@ def main():
         print(f"spawned ego + {nv} vehicles + {nw} walkers on {cfg.CARLA_MAP}", flush=True)
 
         core = DriverCore(world, ego, ad, model, proc, replan_every=a.replan_every,
-                          )
+                          speed_mode=a.speed_mode)
         core.attach_sensors()
         core.warmup(world.tick)
         for _ in range(a.steps):
