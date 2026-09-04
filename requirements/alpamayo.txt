@@ -1,0 +1,18 @@
+# Everything: Scenic + CARLA client + NVIDIA Alpamayo through Carlamayo. Python 3.12.
+# Versions follow Carlamayo's pyproject (torch 2.8.0, transformers 4.57.1). flash-attn is
+# optional and not required here. The two Alpamayo packages themselves are installed
+# from Carlamayo's submodules by scripts/setup_env.sh (editable, --no-deps).
+-r sim.txt
+torch==2.8.0
+torchvision==0.23.0
+transformers==4.57.1
+accelerate>=1.12.0
+einops>=0.8.1
+hydra-core>=1.3.2
+hydra-colorlog>=1.2.0
+colorlog>=6.0
+av>=16.0.1
+scipy>=1.14
+matplotlib>=3.10
+pygame>=2.6
+huggingface_hub>=0.36,<1.0
