@@ -14,3 +14,6 @@ outputs/
 # Credentials
 .env
 secrets/
+
+# VLA candidate environments (scripts/setup_*_env.sh)
+envs/
