@@ -3,7 +3,7 @@
   python cornercase/live_server.py [port] [site_dir]     (defaults: 8900, outputs/site)
 
 GET  /                      the generated pages (Range-capable, so <video> works)
-POST /api/run               {scenario, model, seed, steps} -> {id}
+POST /api/run               {scenario, model, vehicle, seed, steps} -> {id}
 GET  /api/status?id=...     progress JSON published by the worker
 GET  /api/health            is a worker resident?
 GET  /live/out/<file>       videos of finished live runs
@@ -22,6 +22,8 @@ _U, _P = os.environ.get("DEMO_USER"), os.environ.get("DEMO_PASS")
 _AUTH = ("Basic " + base64.b64encode(f"{_U}:{_P}".encode()).decode()) if _U and _P else None
 JOBS, STATUS = os.path.join(LIVE, "jobs"), os.path.join(LIVE, "status")
 SAFE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+# must match VEHICLES in cornercase/live_worker.py
+VEHICLES = ("mkz2017", "mkz2020", "model3", "charger")
 
 
 class H(http.server.SimpleHTTPRequestHandler):
@@ -67,6 +69,9 @@ class H(http.server.SimpleHTTPRequestHandler):
             return self._json({"error": "bad scenario"}, 400)
         if model not in ("1", "1.5"):
             return self._json({"error": "bad model"}, 400)
+        vehicle = str(req.get("vehicle", "mkz2017"))
+        if vehicle not in VEHICLES:
+            return self._json({"error": "bad vehicle"}, 400)
         if not os.path.exists(paths.scenario_file(scen)):
             return self._json({"error": "unknown scenario"}, 404)
         try:
@@ -82,7 +87,7 @@ class H(http.server.SimpleHTTPRequestHandler):
         tmp = os.path.join(JOBS, jid + ".json.tmp")
         with open(tmp, "w") as f:
             json.dump({"id": jid, "scenario": scen, "model": model,
-                       "seed": seed, "steps": steps,
+                       "seed": seed, "steps": steps, "vehicle": vehicle,
                        "mode": "live"}, f)
         os.replace(tmp, os.path.join(JOBS, jid + ".json"))
         pend = len([x for x in os.listdir(JOBS) if x.endswith(".json")])

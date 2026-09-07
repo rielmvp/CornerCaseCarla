@@ -77,6 +77,16 @@ def draw_overlay(cam_img, pred_xyz, frame_count, cot_text, speed_kmh, steering):
 _Q = os.environ.get("LIVE_QUEUE") or paths.LIVE
 JOBS, STATUS, OUT = f"{_Q}/jobs", f"{_Q}/status", f"{_Q}/out"
 
+# Ego vehicles offered in the UI. Deliberately all mid-size sedans of similar
+# footprint to the scenario's own Lincoln MKZ: the model cameras are mounted at
+# fixed offsets, so a similar body keeps the viewpoint - and the mass/wheelbase
+# the PID controller has to track - close to what the scenarios were built for.
+VEHICLES = {
+    "mkz2017": "vehicle.lincoln.mkz_2017",
+    "mkz2020": "vehicle.lincoln.mkz_2020",
+    "model3":  "vehicle.tesla.model3",
+    "charger": "vehicle.dodge.charger_2020",
+}
 OBSERVERS = {
     "bev": dict(x=0.0,  y=0.0, z=28.0, pitch=-90.0, yaw=0.0, fov=90, w=960,  h=540),
     "fpv": dict(x=1.4,  y=0.0, z=1.5,  pitch=0.0,   yaw=0.0, fov=90, w=1280, h=720),
@@ -120,6 +130,7 @@ class LiveSim(CarlaSimulation):
     jid = ""
     total_steps = 120
     job_seed = 42
+    ego_blueprint = ""      # optional override, e.g. "vehicle.tesla.model3"
     ctrl = None             # per-step recorded controls to re-render a drive (render_clean.py)
     cot_trace = None        # [{"t": i, "coc": text}] to caption a replayed drive
     overlay = True          # draw the prediction overlay on the first-person view
@@ -133,6 +144,7 @@ class LiveSim(CarlaSimulation):
         self._mq, self._oq = {}, {}     # name -> Queue of raw carla images
         self._traj = self._pred = None
         self._sel, self._cot, self._inf_t, self._prev_traj = 0, "", 0.0, None
+        self.collisions = []   # collision events, filled by the sensor callback
         self._prev = {"steer": 0.0, "throttle": 0.0, "brake": 0.0}
         self._i = 0
         ego = self.objects[0].carlaActor
@@ -174,6 +186,17 @@ class LiveSim(CarlaSimulation):
             self._oq[name] = Queue()
             s.listen(self._oq[name].put)
             self._sensors.append(s)
+        # Collision sensor: the only reliable way to say whether a run failed.
+        # Events carry the actor hit, and _i is captured at delivery so the step
+        # is known. CARLA re-fires while contact persists, so events are
+        # deduplicated by (actor, step) when summarised.
+        cbp = bl.find("sensor.other.collision")
+        cs = self.world.spawn_actor(cbp, carla.Transform(), attach_to=ego)
+        cs.listen(lambda e: self.collisions.append(
+            {"step": self._i, "with": str(getattr(e.other_actor, "type_id", "?")),
+             "impulse": float((e.normal_impulse.x**2 + e.normal_impulse.y**2
+                               + e.normal_impulse.z**2) ** 0.5)}))
+        self._sensors.append(cs)
         self.pid = OfficialPIDFollower(self.world, ego)
         for _ in range(cfg.NUM_HISTORY):
             self.world.tick(); self._collect(); self._rec()
@@ -204,6 +227,13 @@ class LiveSim(CarlaSimulation):
                 a = np.frombuffer(img.raw_data, np.uint8).reshape(
                     (img.height, img.width, 4))[:, :, :3]
                 store[name] = (a[:, :, ::-1] if to_rgb else a).copy()
+
+    def createObjectInSimulator(self, obj):
+        # The scenario hardcodes EGO_MODEL; overriding the blueprint here keeps
+        # the scenario file untouched while still letting the demo pick a car.
+        if self.ego_blueprint and obj is self.objects[0]:
+            obj.blueprint = self.ego_blueprint
+        return super().createObjectInSimulator(obj)
 
     def _rec(self):
         tf = self.objects[0].carlaActor.get_transform()
@@ -340,7 +370,7 @@ class LiveSimulator(CarlaSimulator):
         self.scenario_number += 1
         LiveSim.adapter, LiveSim.model, LiveSim.processor = self._ad, self._m, self._p
         LiveSim.replan_every, LiveSim.jid, LiveSim.total_steps = self._replan, self._jid, self._steps
-        LiveSim.job_seed = self._seed
+        LiveSim.job_seed, LiveSim.ego_blueprint = self._seed, self._vehicle
         LiveSim.ctrl = getattr(self, "_ctrl", None)
         LiveSim.cot_trace = getattr(self, "_cot_trace", None)
         LiveSim.overlay = getattr(self, "_overlay", True)
@@ -428,7 +458,8 @@ def run_job(job, models, port):
         raise FileNotFoundError(f"no scenario {stem} in {paths.SCENARIOS}")
     town = town_of(f); xodr = paths.map_file(town)
     pub(jid, phase="compiling", step=0, total=steps, scenario=stem,
-        model=ad.display_name, seed=seed, town=town)
+        model=ad.display_name, seed=seed, town=town,
+        vehicle=str(job.get("vehicle", "mkz2017")))
     t0 = time.time()
     # The seed decides the SCENE: Scenic samples road, positions and timings
     # from python/numpy RNGs. The curated scenarios were checked at seed 42, so
@@ -447,7 +478,7 @@ def run_job(job, models, port):
                         timestep=0.1, timeout=int(os.environ.get("CARLA_TIMEOUT", "300")))
     sim._ad, sim._m, sim._p = ad, model, proc
     sim._replan, sim._jid, sim._steps = int(job.get("replan_every", 1)), jid, steps
-    sim._seed = seed
+    sim._seed, sim._vehicle = seed, VEHICLES.get(str(job.get("vehicle", "")), "")
     # A recorded per-step control trace re-renders an earlier drive without
     # consulting the model: the commands that were actually applied are replayed.
     # render_clean.py uses this to get overlay-free views of a batch run.
@@ -481,18 +512,23 @@ def run_job(job, models, port):
         if e is not None and e.close():
             vids[v] = f"live/out/{jid}__{v}.mp4"     # URL path; live_server maps it to OUT
 
-    # full per-step trace
+    # full per-step trace, for manoeuvre_check.py and grab_frames.py
     try:
         with open(os.path.join(OUT, f"{jid}__trace.json"), "w") as f:
-            json.dump({"job": job, "cot": s._cot, "trace": s.trace}, f)
+            json.dump({"job": job, "cot": s._cot, "trace": s.trace,
+                       "collisions": getattr(s, "collisions", [])}, f)
     except Exception:
         pass
     sp = [x["speed"] for x in s.trace] or [0]
     pub(jid, phase="done", step=steps, total=steps, videos=vids,
         cot=s._cot, wall_s=round(time.time()-t0, 1),
+        collisions=len({(c["with"], c["step"] // 5) for c in getattr(s, "collisions", [])}),
+        collided_with=sorted({c["with"] for c in getattr(s, "collisions", [])})[:3],
+        first_collision=(min((c["step"] for c in getattr(s, "collisions", [])), default=-1)),
         inference_calls=len(s.inf_times),
         inference_mean_s=round(float(np.mean(s.inf_times)), 2) if s.inf_times else 0,
         speed_mean=round(sum(sp)/len(sp), 2), traj_samples=cfg.NUM_TRAJ_SAMPLES,
+        vehicle=str(job.get("vehicle", "mkz2017")),
         mode=("replay" if sim._ctrl is not None else "live"))
 
 
