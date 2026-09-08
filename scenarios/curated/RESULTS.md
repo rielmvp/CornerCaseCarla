@@ -30,7 +30,8 @@ read from the episode's mean speed, not from the event count (see below).
 | `curated_11` | steel plank from an unsecured load | excluded | excluded | see below |
 | `curated_12` | wrong-way truck revealed by a lead car | excluded | excluded | see below |
 
-**Of the twelve, nine crash both models and ten break at least one; `curated_01` crashes both too.**
+**Of the twelve, nine crash both models and ten break at least one; `curated_01` crashes both too.** The studio offers
+`curated_08`, `curated_01`, `curated_05`, `curated_09` and `curated_10` as cornercase_1–5.
 
 ### Why 11 and 12 are excluded
 
