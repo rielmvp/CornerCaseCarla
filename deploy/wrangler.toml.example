@@ -1,0 +1,12 @@
+# Copy to wrangler.toml, fill in the KV namespace id, then `npx wrangler deploy`.
+name = "cornercase-demo"
+main = "worker-frontdoor.js"
+compatibility_date = "2026-09-01"
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "<your KV namespace id>"
+
+# Optional fallback when KV is empty:
+# [vars]
+# TUNNEL_URL = "https://<something>.trycloudflare.com"
