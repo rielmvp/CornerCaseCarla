@@ -5,6 +5,11 @@ closed-loop by NVIDIA's Alpamayo vision-language-action models. A web studio run
 live on the GPU, on four different cars and with either Alpamayo version. The simulated corner
 cases were displayed in an exhibition to showcase lab research efforts 😄
 
+<img src="docs/media/reel_reasoning.gif" width="100%" alt="Showcase reel with Alpamayo's reasoning">
+
+*Three corner cases. Bird's-eye on the left, the model's own front camera in the middle with its
+reasoning, chase camera on the right.*
+
 ## What it does
 
 1. **Corner cases as text, then Scenic.** Each case in [`scenarios/curated/`](scenarios/curated/)
@@ -168,8 +173,3 @@ third_party/Carlamayo  submodule (Alpamayo adapters, PID, camera rig), unmodifie
 - [NVIDIA Alpamayo](https://github.com/NVlabs/alpamayo) 1 and 1.5. Weights are under NVIDIA's
   license and are not redistributed.
 - [CARLA](https://carla.org/) and [Scenic](https://scenic-lang.org/).
-
-## License
-
-Apache 2.0, see [LICENSE](LICENSE). Carlamayo, Alpamayo, CARLA and Scenic keep their own
-licenses.
