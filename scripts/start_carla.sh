@@ -6,6 +6,8 @@
 # Each server binds port, port+1 and port+2, so space ports at least 3 apart.
 cd "$(dirname "$0")/.."
 ROOT=$PWD
+# Settings from .env (copy config.example.env)
+[ -f .env ] && { set -a; . ./.env; set +a; }
 CARLA_ROOT=${CARLA_ROOT:-$ROOT/carla/CARLA_0.9.16}
 LOG_DIR=${LOG_DIR:-$ROOT/logs}
 mkdir -p "$LOG_DIR"

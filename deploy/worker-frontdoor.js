@@ -10,7 +10,7 @@
  *   1. Create a KV namespace, then copy wrangler.toml.example to wrangler.toml
  *      and put its id in.
  *   2. `npx wrangler deploy` from this directory.
- *   3. In demo.sh's environment set CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID and CF_KV_TOKEN (an API
+ *   3. In .env set CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID and CF_KV_TOKEN (an API
  *      token with Workers KV Storage:Edit only). demo.sh then writes each new
  *      tunnel URL into KV under "tunnel_url" (KV takes up to ~60s to spread).
  *   Optionally set a plain-text variable TUNNEL_URL as a fallback.

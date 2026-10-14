@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the live demo and keep it running, on one GPU.
 #
-#   GPU=0 CARLA_PORT=2000 scripts/demo.sh      (settings from the environment)
+#   scripts/demo.sh                 (settings from .env; see config.example.env)
 #   scripts/stop_demo.sh            stops what this started
 #
 # Watches these services and starts ONLY the ones that are missing:
@@ -17,6 +17,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$PWD
+[ -f .env ] && { set -a; . ./.env; set +a; }
 GPU=${GPU:-0}
 CARLA_ADAPTER=${CARLA_ADAPTER:-$GPU}
 CARLA_PORT=${CARLA_PORT:-2000}
@@ -51,7 +52,7 @@ sys.exit(0 if s.connect_ex(('127.0.0.1',$1))==0 else 1)" 2>/dev/null
 pid_of() { ps -u "$(id -u)" -o pid=,cmd= | grep -F -- "$1" | grep -v grep | awk '{print $1; exit}'; }
 
 # Publish the tunnel hostname so the Worker in deploy/ can find it. Credentials
-# come from the environment and are never echoed; only success or failure is logged.
+# come from .env and are never echoed; only success or failure is logged.
 publish_url() {
   [ -n "${CF_ACCOUNT_ID:-}" ] && [ -n "${CF_KV_TOKEN:-}" ] && [ -n "${CF_KV_NAMESPACE_ID:-}" ] || return 0
   ok=$(curl -s -m 20 -X PUT -H "Authorization: Bearer $CF_KV_TOKEN" \

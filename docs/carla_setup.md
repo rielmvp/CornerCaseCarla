@@ -20,12 +20,14 @@ no separate map download is needed.
 ## 2. Python environment
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements/sim.txt
+scripts/setup_env.sh          # .venv: Scenic, CARLA client, torch 2.8, both Alpamayo packages
 ```
 
-Python 3.10 and 3.12 both work. Keep `shapely` below 2.1: Scenic 3.1.0a1 allows 2.1, but
-scene sampling then fails inside `scenic/core/regions.py`.
+One Python 3.12 environment holds everything (`requirements/alpamayo.txt`, which includes
+`requirements/sim.txt`). The script fetches Carlamayo and its Alpamayo submodules, and installs
+the two Alpamayo packages without their declared dependencies: they pin `flash-attn` and
+`physical_ai_av`, neither of which the CARLA path needs. Keep `shapely` below 2.1: Scenic
+3.1.0a1 allows 2.1, but scene sampling then fails inside `scenic/core/regions.py`.
 
 ## 3. GPU rendering (Vulkan)
 
@@ -59,3 +61,6 @@ python scripts/carla_smoke_test.py --port 2000 --map Town03 --out logs/smoke
   1920×1080 take about 20 s. On a software rasterizer the port effectively never opens.
 - Servers are started with `setsid`, so they keep running after the shell exits. Stop
   one by the PID the script prints.
+- The server occasionally segfaults (`Signal 11` in its log) within its first minute,
+  especially on a busy GPU. Start it again; once it has rendered, it stays up.
+  `scripts/demo.sh` restarts it automatically.

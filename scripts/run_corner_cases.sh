@@ -7,6 +7,7 @@
 # Re-running resumes: scenarios already in the results file are skipped.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+[ -f .env ] && { set -a; . ./.env; set +a; }
 SCEN=${1:-curated_08,curated_01,curated_05,curated_09,curated_10}
 PORT=${CARLA_PORT:-2000}
 export CUDA_VISIBLE_DEVICES=${GPU:-0}

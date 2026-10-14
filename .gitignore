@@ -14,3 +14,6 @@ outputs/
 # Credentials
 .env
 secrets/
+
+# Model weights (scripts/download_models.sh)
+checkpoints/

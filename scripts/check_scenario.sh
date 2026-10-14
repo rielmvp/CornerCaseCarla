@@ -8,6 +8,7 @@
 #    where every other actor is relative to the ego.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+[ -f .env ] && { set -a; . ./.env; set +a; }
 ID=$1
 F=scenarios/curated/$ID.scenic
 mkdir -p outputs/previews
